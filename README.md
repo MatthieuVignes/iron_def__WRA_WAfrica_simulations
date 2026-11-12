@@ -59,7 +59,6 @@ run_study.R          command-line entry point (quick / full)
 06_bias_budget.R     switch error sources off one at a time (paired seeds)
 report.qmd           Quarto report (rationale, methods, results)
 results/             saved outputs used by the report
-docs/                TUTORIAL_GUIDE.md and a runnable Quarto-book template (docs/tutorial_template)
 ```
 
 ## Requirements
@@ -153,13 +152,9 @@ Seeds are fixed per replicate and shared across scenarios (common random numbers
 the "true" composition table, prices and unit conversions use a separate `table_seed`, 
 so scenario comparisons are paired. Parallel runs use `future`/`furrr`.
 
-## Tutorial companion
+## Companion report
 
-`report.qmd` is written as a results report. 
-[`docs/TUTORIAL_GUIDE.md`](docs/TUTORIAL_GUIDE.md) explains how to turn it into a 
-tutorial that walks through the simulations, and 
-[`docs/tutorial_template/`](docs/tutorial_template/) is a runnable Quarto book with 
-one complete chapter (`cd docs/tutorial_template && quarto render`).
+`report.qmd` is written as a methods and results report. 
 
 ## Citation and licence
 

@@ -1,0 +1,458 @@
+---
+title: "How well can a household food survey tell us about women's iron intake?"
+subtitle: "A simulation study of the 'other food' blind spot, survey errors and food sharing"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    code-fold: true
+    code-summary: "Show R code"
+    embed-resources: true
+    fig-width: 8
+    fig-height: 4.6
+execute:
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| include: false
+library(ggplot2); library(dplyr); library(tidyr)
+for (f in c("R/00_params.R", "R/01_simulate.R", "R/02_estimators.R")) source(f)
+theme_set(theme_minimal(base_size = 12) + theme(legend.position = "bottom", legend.direction = "vertical"))
+
+res <- readRDS("results/study_full.rds")      # one row per replicate x estimator x region
+ill <- readRDS("results/illustration.rds")    # one worked example
+bb  <- readRDS("results/bias_budget.rds")     # error sources switched off one at a time
+
+res$id <- sub(":.*", "", res$estimator)       # short code: A, A+, B0, B1, B1w, C0, C1, C1w
+nice <- c("A"   = "A · Simple, ignoring 'other'",
+          "A+"  = "A+ · Simple, adding 'other'",
+          "B0"  = "B0 · Usual-intake, ignoring 'other'",
+          "B1"  = "B1 · Usual-intake, adding 'other'",
+          "B1w" = "B1w · Usual-intake, 'other' assumed wrongly",
+          "C0"  = "C0 · Bayesian, ignoring 'other'",
+          "C1"  = "C1 · Bayesian, adding 'other'",
+          "C1w" = "C1w · Bayesian, 'other' assumed wrongly")
+cols <- c("A" = "#4d4d4d", "A+" = "#9a9a9a", "B0" = "#0072B2", "B1" = "#56B4E9", "B1w" = "#009E73",
+          "C0" = "#D55E00", "C1" = "#E69F00", "C1w" = "#CC79A7")
+shps <- c("A" = 16, "A+" = 1, "B0" = 15, "B1" = 0, "B1w" = 2, "C0" = 17, "C1" = 2, "C1w" = 5)
+res$estimator <- factor(nice[res$id], levels = nice)
+
+all0 <- res |> filter(region == 0) |> mutate(err = 100 * (est - truth))   # error in percentage points
+summ <- all0 |> group_by(id, estimator, scenario, factor, level) |>
+  summarise(n = n(), bias = mean(err), sd_err = sd(err), mcse = sd(err) / sqrt(n()),
+            rmse = sqrt(mean(err^2)),
+            coverage = ifelse(all(is.na(lo)), NA, mean(lo <= truth & truth <= hi)),
+            width = ifelse(all(is.na(lo)), NA, 100 * mean(hi - lo)),
+            truth = mean(truth), frac_other = mean(frac_iron_other), .groups = "drop")
+gv <- function(sc, id, what = "bias") summ[[what]][summ$scenario == sc & summ$id == id]
+f1 <- function(x) formatC(x, format = "f", digits = 1)
+f0 <- function(x) formatC(x, format = "f", digits = 0)
+
+# paired "price of ignoring other": same simulated surveys, with vs without 'other'
+pw <- all0 |> filter(factor == "p_other") |> select(scenario, level, rep, id, est) |>
+  pivot_wider(names_from = id, values_from = est) |>
+  mutate(over_simple = 100 * (A - `A+`), over_usual = 100 * (B0 - B1), wrong = 100 * (B1 - B1w))
+pair <- pw |> group_by(p = as.numeric(level)) |>
+  summarise(n = n(), over_simple_m = mean(over_simple), over_simple_se = sd(over_simple) / sqrt(n()),
+            over_usual_m = mean(over_usual), over_usual_se = sd(over_usual) / sqrt(n()),
+            wrong_m = mean(wrong), .groups = "drop")
+pp <- function(p, col) pair[[col]][abs(pair$p - p) < 1e-9]
+ov <- function(p) f1(pp(p, "over_simple_m"))
+
+# typical spread of the error between simulated surveys, simple estimator, default world
+sd_default <- gv("p_other=0.05", "A", "sd_err")
+```
+
+# Summary
+
+**The question.** A household survey records what households *buy*. We want to know what share of women of reproductive age (WRA) do not get *enough iron*. One category in the survey, "general food / other" (e.g. prepared meals, take-away), is a black box: we know how much money went into it but not what is in it. How much accuracy do we lose by ignoring it, or by guessing what is in it? And how do survey mistakes and food sharing between households change the answer?
+
+**The approach.** We cannot answer this with real data, because nobody knows the true iron intake of WRAs in a real survey. So we built a *virtual Ghana*: a computer-generated population where we know every woman's true intake and need, then generated a realistic, error-prone survey from it, and tried several estimation methods on that survey. Because we know the truth, we can measure how correct/wrong each method is.
+
+**What we found** (in a first run, with placeholder input parameters, see @sec-limits):
+
+1. **Ignoring "other" makes the prevalence look too high, and the effect grows quickly with its spending share.** Compared with adding it back, ignoring it overstated prevalence by about `r ov(.05)` pp when "other" is 5% of spending, `r ov(.10)` pp at 10%, `r ov(.20)` pp at 20% and `r ov(.30)` pp at 30%.
+2. **At low shares, this is not the main problem.** The estimate from one simulated survey typically misses the truth by about `r f0(sd_default)` pp (standard deviation of the error), whatever we do about "other". At 5%, the price of ignoring "other" is small next to that.
+3. **A reasonable guess for the composition of "other" works well**, because "other" carries a modest share of the iron (about `r f0(100*gv("p_other=0.20", "A", "frac_other"))`% of all iron, when it is 20% of spending). A wrong guess costs a few more points at high shares (up to about `r f1(pp(.30, "wrong_m"))` pp at 30%).
+4. **The largest errors in the average come from mistakes that push every household in the same direction**: food that leaves the household but is counted as eaten (which makes prevalence look too low) and forgotten items (which make it look too high). Because they act on every household alike, **interviewing more households does not remove them**.
+5. **The Bayesian approach gives similar point estimates to the simpler "usual-intake" approach and adds an interval**, but with only a handful of replicates we could not establish that its intervals are reliable.
+
+**What this means for a real survey:** the best use of extra effort is probably not a bigger sample but measuring these systematic errors: where food goes after it is bought, how often items are forgotten, and what is in the prepared foods.
+
+# The question in more detail
+
+## What do we want to estimate?
+
+For each WRA, two quantities matter:
+
+* her **intake**: how much iron she *absorbs* from food per day (food iron times the share the body absorbs; we use a fixed 14% for now), and
+* her **requirement**: how much absorbed iron she needs per day. This differs between women, so we treat it as a *distribution* (for most women a median of about 1.5 mg/day, more in pregnancy, less when breastfeeding).
+
+A woman is **inadequate** if her intake is below her requirement. Since we do not know her individual requirement exactly, we use a **probability approach**: for each woman we compute the *probability* that her requirement exceeds her intake, and we take the average of these probabilities over all women. That average is the **prevalence of inadequate intake**, which is our target.
+
+```{r fig-prob}
+#| fig-cap: "The probability approach. The curve shows how requirements vary between women with the same characteristics. A woman whose intake is 1.2 mg/day is below the requirement of a large share of such women (shaded area), so she is counted as 'mostly inadequate'; a woman with 2.0 mg/day is counted as 'rarely inadequate'."
+#| fig-height: 3.6
+par0 <- default_params(); sdl <- sqrt(log(1 + par0$req_cv[["other"]]^2)); m <- par0$req_other_median
+xs <- seq(0.3, 4, length.out = 500); dd <- data.frame(x = xs, y = dlnorm(xs, log(m), sdl))
+pr <- function(i) 100 * (1 - plnorm(i, log(m), sdl))
+ggplot(dd, aes(x, y)) + geom_line(linewidth = 1) +
+  geom_area(data = filter(dd, x >= 1.2), fill = "#D55E00", alpha = .35) +
+  geom_area(data = filter(dd, x >= 2.0), fill = "#0072B2", alpha = .45) +
+  geom_vline(xintercept = c(1.2, 2.0), linetype = 2) +
+  annotate("text", x = 1.15, y = 0.95, hjust = 1, label = sprintf("intake 1.2: %.0f%% chance\nof being inadequate", pr(1.2)), size = 3.6) +
+  annotate("text", x = 2.05, y = 0.55, hjust = 0, label = sprintf("intake 2.0: %.0f%% chance", pr(2.0)), size = 3.6) +
+  labs(x = "absorbed iron (mg/day)", y = "density of requirement")
+```
+
+::: {.callout-warning}
+## Low intake is not the same as deficiency (something I read [here](https://www.healthline.com/health/iron-deficiency-inadequate-dietary-iron))
+A survey of food can only tell us about **inadequate iron intake**. Iron *deficiency* (low ferritin, anaemia) also depends on infections such as malaria, blood loss, pregnancy and how well the body absorbs iron, none of which a food survey sees. To connect the two, a blood sample (in a sub-group) would be needed.
+:::
+
+## Why a simulation?
+
+In a real survey nobody observes the true intake, so nobody can say how wrong an estimate is. A simulation solves this (at the potential cost data realism...but we do our best!). 
+More specifically, we create the "world", so we know the truth; then we create the survey data that world would produce, with realistic (known) mistakes; then we see how close each estimation method gets to the truth we hid from it. We can repeat this hundreds of times and change one thing at a time (for example, the share of money spent on "other"). Or several things.
+
+# How the virtual Ghana works {#sec-sim}
+
+The simulator follows this chain of events:
+
+| Step | What happens | Main parameters |
+|--|-----|--|
+| 1. People | `n_hh` (default 400) households in 4 regions (North, East, South, West) with a random size, ages and sexes; some women are pregnant or breastfeeding; income differs by region (with `inc_mu`; it changes how much food is bought and what mix is bought) | `n_hh`, `p_pregnant`, `p_lactating` |
+| 2. Food bought | Each household needs a certain amount of energy per week. It buys 12 food groups to cover it; the mix depends on region and income. A share `p_other` of the money goes to "general food / other" | `p_other` |
+| 3. What "other" contains | "Other" is a random mix (controlled by `other_center`) of the same 12 food groups (like a cooked meal), bought at a higher price per kilogram (controlled by `other_markup`) | `other_center`, `other_markup` |
+| 4. Sharing | About 1 household in 5 (controlled by `p_cluster` at a default of 0.2) belongs to a cluster of 2–4 neighbours (`cluster_size`) who share food (`share_out` defaults to 0.15 and is the everyday sharing inside a group); some bulk purchases are recorded under one buyer only per cluster (`bulk_buyer_prob` defaulting to 0.5 for that buyer); some purchased food goes to **relatives living elsewhere** (`nonres_out`, default 7%) | `p_cluster`, `share_out`, `bulk_buyer_prob`, `nonres_out` |
+| 5. Who eats what | Within a household, each person's share is proportional to their energy need. WRA have it multiplied by exp(`women_bias`) (default is 0, neutral). A household's shares are drawn from a Dirichlet distribution whose average share is each person's weight divided by the household total, and `alloc_conc` (default: 60) sets how tightly (high values) they cluster around that average (10 $\to$ $\pm 60\%$; 60 $\to$ $\pm 25\%$; 200 $\to$ $\pm 14\%$).  | `alloc_conc`, `women_bias` |
+| 6. The truth | Each woman's true absorbed iron intake is compared with her own true requirement. `absorption` is the fraction of dietary iron the body absorbs. Set at 14% for all WRA. Notice that it will directly impact the prevalence of inadequate intake. About 0.26. If set at 10% or 18%, the prevalence would be about 0.5 or 0.15, respectively. | `absorption`, requirement settings |
+| 7. The survey | The survey sees each household for 2-4 weeks. Some items are forgotten (`omit_rate`, default 8%), records quantities with error (`qty_err_sd` off by typicall $\pm$ 25\%), and about half (`p_unit_reported` defaut of 0.5) of them in local units (bowls or bags), whose weight varies by region and is unknown to the analyst | `omit_rate`, `qty_err_sd`, `p_unit_reported` |
+
+Steps 1-6 produce the *truth*, whilst step 7 produces the *data* the analyst gets. All estimation methods only use this *data*.
+
+## The 12 food groups
+
+```{r foodtab}
+ft <- food_table()
+knitr::kable(data.frame(Food = gsub("_", " ", ft$food), `Iron (mg per 100 g)` = ft$fe_100g,
+                        `Price (GHS/kg)` = ft$price, `Weight of a bowl/bag (kg)` = ft$unit_kg, check.names = FALSE))
+```
+
+::: {.callout-important}
+**These numbers are placeholders**, chosen to be plausible, not taken from a real food-composition table or price survey. They should be replaced by the West African food composition table and local price and weight data.
+:::
+
+## What the survey data look like
+
+Each row below is one purchase reported by one household in one weekly visit.
+
+```{r example}
+s0 <- simulate_survey(default_params(), seed = 1, table_seed = 1)
+nm <- gsub("_", " ", ft$food)
+ex <- s0$obs |> head(6) |>
+  transmute(Household = hh, Visit = visit, Region = default_params()$region_names[region], Food = nm[food],
+            `Reported in` = ifelse(type == "kg", "kilograms", "bowls/bags"), Amount = value, `Money spent (GHS)` = round(spend, 1))
+knitr::kable(ex)
+```
+
+Besides these rows, each visit has a total of money spent on "other". 
+
+In the present example survey there are `r nrow(s0$hh)` households, `r nrow(s0$people)` people and `r nrow(s0$wra)` WRAs; the **true** prevalence of inadequate intake among them is `r f1(100 * s0$truth$prev_all)`%.
+
+# The estimation methods {#sec-methods}
+
+We compare three families of methods. They differ in how much they try to correct for the problems in the data. Each exists in a version that ignores "other" and a version that adds it back.
+
+```{r tab-methods}
+knitr::kable(data.frame(
+  Method = c("A / A+", "B0 / B1 (and B1w)", "C0 / C1 (and C1w)"),
+  `In one sentence` = c(
+    "Convert bowls and bags to kilograms with standard values, multiply by standard iron values, divide the household's iron among its members by energy need, count who falls short.",
+    "As A, but also (i) corrects for an assumed share of forgotten food and food that left the household, (ii) smooths each household's few weeks of data toward a typical 'usual intake', and (iii) allows women in a household to get different shares.",
+    "Same idea as B, but instead of using one guess for each uncertain quantity, it uses a plausible range and carries that uncertainty through to an interval around the prevalence (Bayesian)."),
+  `Needs` = c("Nothing beyond the survey and standard tables", "Assumed rates of forgetting and food leaving the household", "The same, as ranges ('priors')"),
+  check.names = FALSE))
+```
+
+Codes: **0** = ignore "other"; **1** (or **+** for A) = add "other" back using an assumed composition; **w** = the assumed composition is deliberately *wrong* (a staple-heavy mix instead of a meal-like mix), to see how much a bad guess costs.
+
+## How "other" is added back
+
+We know the money spent on "other" but not what it buys. We assume a typical composition (a mix of the 12 groups like a cooked meal), a typical price per kilogram (the raw-food price times a markup), and convert money to kilograms of food to iron. In the Bayesian versions the composition is *not fixed*: it is drawn from a range, so a different plausible mixture is used in each calculation.
+
+## Why "usual intake" matters
+
+A household's iron intake in a single week bounces around: one week it buys a lot of beans, the next it does not. If we treat each week as the household's normal diet, we make households look *more different from each other* than they really are, which exaggerates the number of households at the low and the high extremes. The usual-intake step estimates how much of the week-to-week variation is noise and pulls each household's value back toward the regional average by the right amount, which gives a fairer picture of how many women fall below their requirement.
+
+## What "Bayesian" means here
+
+Many quantities are not known exactly: how much a bowl of rice weighs in the North, how much iron is in a typical portion, how much food was forgotten, what "other" contains, etc. Rather than fixing each at one value, the Bayesian method gives each a **plausible range**, then:
+
+1. *Draws* one set of plausible values from these ranges and recomputes each household's iron intake.
+2. *Fits a statistical model* to that adjusted data (done with Stan, called from R) to describe how intake varies between regions, between households and from week to week. The model then gives a prevalence together with its own uncertainty.
+3. *Repeats* this several times (here 4 sets of plausible values) and pools the results.
+
+The final answer is a prevalence with a **95% credible interval**: a range that should contain the true value with probability 95%, if the ranges we gave were realistic. Limitations: the data cannot *correct* those ranges (a survey of purchases tells us nothing about how heavy a bowl is), so the intervals are only as good as the ranges we put in; and here the ranges are centred on the values that generated the data, which is the best case.
+
+::: {.callout-note}
+## What the analyst is told in this study
+To keep the first study simple, methods B and C are given the **true** share of forgotten items and the **true** share of food that leaves the household. Real analysts would not know these. Studying what happens when they are wrong could be a future experiment.
+:::
+
+# How we evaluate the methods
+
+We repeat the whole process (new virtual Ghana, new survey, all methods) many times. Each repeat is a **replicate**. For each replicate we compute the **error** = estimated prevalence minus true prevalence, in percentage points. A positive error means the method says there are *more* inadequate WRA intakes than there really are.
+
+* **Bias**: the average error over replicates. Bias near zero means the method is right *on average*
+* **Spread** (standard deviation of the error): how much the error changes from one replicate to another, i.e. how reliable a *single* survey is
+* **RMSE** (root mean squared error): combines both $\to$ a typical "size of the miss"
+* **Coverage** (Bayesian methods only): the share of replicates where the 95% interval contained the truth. It should be close to 95%
+
+Replicates use the same random seeds across scenarios, so that when we change one setting, the simulated worlds are the same except for that setting (a *paired* comparison). Because each replicate takes time, especially for the Bayesian methods, this study we present here is **small**:
+
+```{r tab-reps}
+reps <- all0 |> filter(id == "A") |> count(scenario, name = "replicates")
+knitr::kable(data.frame(Scenario = reps$scenario, Replicates = reps$replicates)[order(reps$scenario), ], row.names = FALSE)
+```
+
+Averages from 6 or 12 replicates are themselves noisy (we show an error bar of ±2 standard errors where we can), so **differences of less than about 3 pp between methods should not be interpreted**. Bayesian methods were run on 3 scenarios, with only 6 replicates each.
+
+# Results
+
+## Question 1. What do we lose by ignoring "other"?
+
+First, how much of the iron really comes from "other"? Prepared food is bought at a higher price per kilogram, so a share of money buys less food, and therefore less iron, than the same money spent on raw food.
+
+```{r tab-price}
+tp <- summ |> filter(factor == "p_other", id == "A") |> arrange(as.numeric(level)) |>
+  transmute(p = as.numeric(level), `True prevalence (%)` = round(100 * truth, 1), `Iron coming from 'other' (%)` = round(100 * frac_other, 1))
+tp <- left_join(tp, pair, by = "p") |>
+  transmute(`Share of spending on 'other'` = scales::percent(p, accuracy = 1), `True prevalence (%)`, `Iron coming from 'other' (%)`,
+            `Overstatement if ignored: simple methods (pp)` = round(over_simple_m, 1),
+            `Overstatement if ignored: usual-intake methods (pp)` = round(over_usual_m, 1))
+knitr::kable(tp)
+```
+
+The last two columns are the **error of ignoring "other"**: the difference between the estimate that ignores it and the one that adds it back, computed on the same simulated surveys. These are precise (standard error about 0.1-0.3 pp). Two things stand out:
+
+* The error rises faster than the spending share: roughly 1.6 pp at 5% but about 15 pp at 30%
+* The *true* prevalence itself rises with the share spent on "other", since that money buys less iron
+
+```{r fig-bias}
+#| fig-cap: "Average error of each method as the share of spending on 'other' grows (6-12 replicates per point; bars show ±2 standard errors). Zero means right on average; above zero means the method overstates prevalence."
+#| fig-height: 5.2
+d <- summ |> filter(factor == "p_other", id %in% c("A", "A+", "B0", "B1", "B1w")) |> mutate(p = as.numeric(level))
+ggplot(d, aes(p, bias, colour = id, shape = id, group = id)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_line(alpha = .6) +
+  geom_pointrange(aes(ymin = bias - 2 * mcse, ymax = bias + 2 * mcse), position = position_dodge(0.012)) +
+  scale_colour_manual(values = cols, labels = unname(nice[c("A", "A+", "B0", "B1", "B1w")]), breaks = c("A", "A+", "B0", "B1", "B1w"), name = NULL) +
+  scale_shape_manual(values = shps, labels = unname(nice[c("A", "A+", "B0", "B1", "B1w")]), breaks = c("A", "A+", "B0", "B1", "B1w"), name = NULL) +
+  scale_x_continuous(labels = scales::percent) +
+  labs(x = "share of spending on 'other'", y = "average error in prevalence (pp)")
+```
+
+**How to read the figure.** The two methods that *ignore* "other" (A and B0) climb as the share grows, because they miss more and more iron. The methods that *add it back* with a sensible composition (A+ and B1) stay roughly flat: they no longer care how big the "other" share is. The one with a deliberately wrong composition (B1w) drifts downwards as the share grows. Note also that at every share the lines do not sit at zero: that is the error from everything else, discussed below.
+
+**A warning note about the simple method A.** At 20% spending on "other", method A has an average error of about zero (`r f1(gv("p_other=0.20", "A"))` pp). This is a coincidence: it ignores "other" (which pushes the estimate up) *and* has other errors that push it down, and at 20% they happen to cancel. At 30% they no longer do (`r f1(gv("p_other=0.30", "A"))` pp). A method that looks good in one situation may be right for the wrong reason.
+
+## Question 2. What if we assume a composition for "other"?
+
+Adding "other" back with a *correct* assumed composition removes the dependence on its share (the flat lines above). But what if the assumed composition is wrong? Method B1w uses a staple-heavy mix instead of the true meal-like mix:
+
+```{r tab-wrong}
+knitr::kable(pair |> transmute(`Share of spending on 'other'` = scales::percent(p, accuracy = 1),
+                               `Extra downward error from a wrong guess (pp)` = round(wrong_m, 1)))
+```
+
+(A positive number means the wrong guess pushes the estimated prevalence further *down* by that many points, compared with the correct guess) 
+
+A wrong guess costs less than 1 pp at 5% and a few pp at 20-30%. The reason it matters this little is that "other" carries a modest share of the iron (this depends on the placeholder values).
+
+### Bayesian methods
+
+```{r tab-bayes}
+sel <- c("p_other=0.05", "p_other=0.20", "accuracy=poor,p=.20")
+tb <- summ |> filter(scenario %in% sel, id %in% c("B0", "B1", "B1w", "C0", "C1", "C1w")) |>
+  mutate(scenario = recode(scenario, "p_other=0.05" = "'other' = 5% of spending", "p_other=0.20" = "'other' = 20% of spending",
+                           "accuracy=poor,p=.20" = "20% 'other', poor survey")) |>
+  transmute(Scenario = scenario, Method = as.character(estimator), Replicates = n, `Average error (pp)` = round(bias, 1),
+            `Typical miss, RMSE (pp)` = round(rmse, 1), `95% interval contained truth` = ifelse(is.na(coverage), "–", scales::percent(coverage, accuracy = 1)),
+            `Average interval width (pp)` = ifelse(is.na(width), "–", f1(width))) |>
+  arrange(Scenario, Method)
+knitr::kable(tb)
+```
+
+The Bayesian methods (C) give point estimates similar to their usual-intake counterparts (B). Their added value is an interval. In this run the intervals were about 20–26 pp wide, and contained the truth in roughly 50-100% of replicates. With only **6 replicates**, a coverage of "5 out of 6" cannot be distinguished from 95% or from 70%, so **this study cannot yet say whether the intervals are reliable**. It does show that the intervals can be badly off when the point estimate is off: they quantify uncertainty we put in the priors, but not the bias from errors the model does not know about.
+
+## Question 3. Does a more accurate survey help?
+
+We compare three levels of survey quality (forgotten items, recall error, spending noise): *good*, *default*, *poor*. Each dot is one simulated survey (replicates 1-6, identical "worlds" across the three).
+
+```{r helper}
+#| include: false
+plot_err <- function(scns, labs, xlab, ids = c("A", "A+", "B0", "B1")) {
+  cm <- all0 |> filter(rep <= 6, id %in% ids) |>
+    mutate(scn = ifelse(scenario == "p_other=0.05", "default", scenario)) |> filter(scn %in% scns)
+  cm$scn <- factor(cm$scn, levels = scns, labels = labs)
+  cm$id <- factor(cm$id, levels = ids)
+  ggplot(cm, aes(id, err, colour = id)) +
+    geom_hline(yintercept = 0, linetype = 2) +
+    geom_jitter(width = .12, alpha = .45, size = 1.8) +
+    stat_summary(fun = mean, geom = "point", shape = 95, size = 9) +
+    facet_wrap(~scn, nrow = 1) +
+    scale_colour_manual(values = cols[ids], guide = "none") +
+    labs(x = NULL, y = "error in prevalence (pp)", caption = "Each dot is one simulated survey; the horizontal bar is the average of the six.")
+}
+```
+
+```{r fig-accuracy}
+#| fig-cap: "Error of four methods when the survey is good, default or poor quality. A = simple method ignoring 'other'; A+ = simple method adding 'other'; B0 / B1 = usual-intake method ignoring / adding 'other'."
+plot_err(c("accuracy=good", "default", "accuracy=poor"), c("good survey", "default survey", "poor survey"))
+```
+
+The pattern is not 'better survey, smaller error'. The simple methods (A, A+) are actually closest to zero with the *poor* survey, and the usual-intake methods (B0, B1) are closest with the *good* one. The explanation is that the survey mistakes push in opposite directions (forgotten items make intake look lower and prevalence higher; food that leaves the household makes it look higher). Making one kind of mistake rarer can therefore make the *net* error larger, not smaller. We have not identified why the usual-intake methods do worse with a poorer survey; a plausible candidate is that they correct for forgotten items with one flat percentage, while in the simulation some foods (vegetables, fruit) are forgotten more often than others (staples). In every cases, the scatter between surveys is similar (about 7 pp).
+
+## Question 4. What about sharing and food for relatives elsewhere?
+
+```{r fig-sharing}
+#| fig-cap: "Error of four methods when there is no sharing, default sharing, or strong sharing (A, A+, B0, B1 as in the previous figure)."
+plot_err(c("sharing=none", "default", "sharing=strong"), c("no sharing", "default sharing", "strong sharing"))
+```
+
+Sharing matters. When there is none, the simple method A is close to right (about `r f1(mean(all0$err[all0$scenario == "sharing=none" & all0$id == "A" & all0$rep <= 6]))` pp); with strong sharing it understates prevalence by about `r f1(abs(mean(all0$err[all0$scenario == "sharing=strong" & all0$id == "A" & all0$rep <= 6])))` pp. The reason is that food bought by a household but eaten elsewhere is counted as eaten at home, so WRA look better fed than they are. The usual-intake methods (B) cope better because they allow for an assumed share of food leaving the household, which we told them correctly.
+
+## Question 5. Which mistakes cost the most? (the 'error budget')
+
+To see which source of error matters, we took the simple method A, ran it on identical simulated worlds and switched error sources off one at a time:
+
+```{r fig-budget}
+#| fig-cap: "Average error of the simple method when individual error sources are removed (12 paired replicates; bars show ±2 standard errors)."
+#| fig-height: 3.8
+b <- bb |> mutate(err = 100 * (est - truth)) |> group_by(variant) |>
+  summarise(m = mean(err), se = sd(err) / sqrt(n()), .groups = "drop") |>
+  mutate(variant = recode(variant, "Everything on (baseline)" = "Everything switched on (default)",
+                          "No omissions" = "No forgotten items", "No recall error" = "No recall error in quantities",
+                          "All quantities reported in kg" = "All quantities given in kg (no bowls/bags)",
+                          "No survey error at all" = "No survey errors of any kind",
+                          "No sharing / outflow" = "No sharing and no food for relatives elsewhere",
+                          "No error AND no sharing" = "No survey errors and no sharing"))
+b$variant <- factor(b$variant, levels = rev(b$variant[order(b$m, decreasing = TRUE)]))
+ggplot(b, aes(m, variant)) + geom_vline(xintercept = 0, linetype = 2) +
+  geom_pointrange(aes(xmin = m - 2 * se, xmax = m + 2 * se), colour = "#0072B2") +
+  labs(x = "average error in prevalence (pp)", y = NULL)
+bm <- setNames(b$m, as.character(b$variant))
+```
+
+Reading it against the default (`r f1(bm[["Everything switched on (default)"]])` pp):
+
+* **Sharing and food leaving the household** are the biggest push in the downwards direction: with no sharing and no food for relatives elsewhere, the error shrinks to `r f1(bm[["No sharing and no food for relatives elsewhere"]])` pp.
+* **Forgotten items** push the other way: they make intake look too low, so *removing* them makes the error *larger* (`r f1(bm[["No forgotten items"]])` pp). That is why the two partly cancel.
+* **Recall error and bowl/bag conversions** matter little for the *average* error (switching them off moves it by less than 2 pp). They may still add scatter from one survey to the next, which this experiment does not show.
+* Even with no survey errors and no sharing, the simple method is still too low (`r f1(bm[["No survey errors and no sharing"]])` pp). A likely reason is that the simple method assumes every WRA gets exactly her fair share of the household's iron; in reality shares vary, and when most WRAs are adequately fed, ignoring this variation hides WRAs who fall short. This is one of the things the usual-intake methods try to allow for (we did not test this explanation separately).
+
+## Question 6. Would more households help?
+
+```{r fig-n}
+#| fig-cap: "Error of four methods with 100, 200, 400 (default) and 800 households (A, A+, B0, B1 as above)."
+plot_err(c("n_hh=100", "n_hh=200", "default", "n_hh=800"), c("100 households", "200", "400 (default)", "800"))
+```
+
+Not noticeably. The average error and its scatter do not shrink as the number of households grows from 100 to 800. Two features of the simulator explain why this is plausible. First, forgotten items and food leaving the household push *every* household in the same direction, so averaging over more households cannot cancel them. Second, in each simulated survey the true iron content of each food and the true weight of each bowl or bag are drawn **once** and shared by all households: if the analyst's standard value is off for rice in the North, it is off for every household there. (We did not separate these contributions, so this is the likely rather than the proven explanation)
+
+## Question 7. Differences between regions
+
+```{r fig-region}
+#| fig-cap: "True and estimated prevalence by region in the default setting (average over 6 simulated surveys). The black diamond is the truth."
+#| fig-height: 4
+rn <- default_params()$region_names
+dr <- res |> filter(scenario == "p_other=0.05", region > 0, id %in% c("A", "B1", "C1")) |>
+  group_by(region, id) |> summarise(est = 100 * mean(est), truth = 100 * mean(truth), .groups = "drop") |>
+  mutate(Region = factor(rn[region], levels = rn))
+ggplot(dr, aes(Region)) +
+  geom_point(aes(y = est, colour = id, shape = id), size = 3, position = position_dodge(.5)) +
+  geom_point(aes(y = truth), colour = "black", size = 3.2, shape = 18) +
+  scale_colour_manual(values = cols, labels = unname(nice[c("A", "B1", "C1")]), breaks = c("A", "B1", "C1"), name = NULL) +
+  scale_shape_manual(values = shps, labels = unname(nice[c("A", "B1", "C1")]), breaks = c("A", "B1", "C1"), name = NULL) +
+  labs(x = NULL, y = "prevalence of inadequate intake (%)")
+```
+
+Regional estimates are noisier and less accurate than the overall one, and the errors are not the same in every region. In this run the simple method understates the prevalence in the North by about 10 pp, while it is close in the West. In the simulator the North diet leans more on millet/sorghum and legumes (and less on roots and fish) than the other regions; we did not investigate which error drives the larger miss there. Regional conclusions from a survey of this size should be treated with much more caution than the national average.
+
+## A worked example, and the 'discrepancy' between intake and need
+
+To see how everything fits together, here is one simulated survey with 20% of spending on "other" (true prevalence `r f1(100 * ill$truth$prev_all)`%).
+
+```{r fig-gap}
+#| fig-cap: "The true gap between each woman's absorbed iron intake and her own requirement in the worked example. Women to the left of zero (orange) have inadequate intake."
+#| fig-height: 3.6
+gp <- data.frame(gap = ill$wra$fe_abs - ill$wra$req)
+ggplot(gp, aes(gap, fill = gap < 0)) +
+  geom_histogram(bins = 45, boundary = 0, colour = "white") +
+  geom_vline(xintercept = 0, linetype = 2) +
+  scale_fill_manual(values = c("TRUE" = "#D55E00", "FALSE" = "grey75"), guide = "none") +
+  annotate("text", x = min(gp$gap), y = Inf, vjust = 2, hjust = 0, size = 3.8,
+           label = sprintf("%.0f%% of WRAs are below their requirement", 100 * mean(gp$gap < 0))) +
+  labs(x = "Intake minus requirement (mg/day, absorbed iron)", y = "number of WRAs")
+```
+
+This distribution, the *discrepancy* between intake and need, is what an analyst would ideally like to see. Real data never shows it: only the survey is available. What the analyst can do is estimate how many WRAs fall to the left of zero:
+
+```{r fig-post}
+#| fig-cap: "In the worked example, the Bayesian method C1 produces a range of plausible prevalences. The histogram pools four separate runs (each started from a different set of plausible values, see text). The solid line is the truth and the dashed line is the estimate of the simple method A."
+#| fig-height: 3.6
+ggplot(data.frame(p = 100 * ill$b1$draws), aes(p)) +
+  geom_histogram(bins = 40, fill = "#E69F00", alpha = .7, colour = "white") +
+  geom_vline(xintercept = 100 * ill$truth$prev_all, linewidth = 1) +
+  geom_vline(xintercept = 100 * ill$naive$prev_all, linetype = 2) +
+  labs(x = "prevalence of inadequate intake (%)", y = "number of draws")
+```
+
+The histogram has two clumps. They are not a feature of the data: they arise because the method runs the whole analysis four times, each time from a different set of plausible values for the bowl weights, iron contents and composition of "other", and the four runs gave averages of about 29%, 32%, 15% and 16% (each run has its own spread of roughly 3 pp). In other words, **the uncertainty coming from the plausible-values step is much larger than the uncertainty the statistical model adds on top**, and four sets are too few to describe it well; using more sets (at least 20-30) will be an easy improvement. In this one example the 95% interval from C1 (`r f0(100 * ill$b1$lo)`% to `r f0(100 * ill$b1$hi)`%) did **not** contain the true value of `r f0(100 * ill$truth$prev_all)`%, and the simple method A (`r f0(100 * ill$naive$prev_all)`%) was closer than C1 (`r f0(100 * ill$b1$prev_all)`%). An interval is only as trustworthy as its ingredients (need more examples!).
+
+# Conclusions and what to do next
+
+**Main conclusion.** In this virtual survey, ignoring the "general food / other" category overstates the prevalence of inadequate iron intake by an amount that depends sharply on how much is spent on it: negligible to small below about 10% of spending, large (about 8 pp or more) from 20% upward. Adding "other" back with a reasonable assumed composition removes most of this dependence; a deliberately wrong composition brings some of it back (up to about 4 pp at 30%). But the overall accuracy of the estimates is governed more by *systematic errors that push every household the same way*: food that leaves households and is counted as eaten, forgotten items, and the simplification of how food is shared inside households. These do not shrink with more households.
+
+**For a real survey, this suggests:**
+
+1. **Measure where purchased food goes.** Ask who eats it (household members, neighbours, relatives elsewhere), and about food received from others.
+2. **Check the bowls and bags.** Weigh a sample of local units in each region. In this simulation they added little to the *average* error, but real conversions may vary more than our placeholders assume.
+3. **Describe "other" better.** Even a few categories (cooked meal, snack, drink) with an estimate of iron per cedi would narrow the black box.
+4. **Run a validation sub-study** (for example weighed food records or repeated 24-hour recalls in some households) to estimate how often items are forgotten and how food is split within the household.
+5. (Add blood samples for a subgroup, to connect inadequate intake with actual deficiency.)
+
+**For the next version of this simulation:** use real food-composition and price tables; run at least about 50 replicates per scenario so that bias, RMSE and coverage are estimated with useful precision; give methods B and C *wrong* assumed rates of forgetting and outflow; and/or make absorption depend on the woman and her diet.
+
+# Limitations {#sec-limits}
+
+* **All inputs are placeholders**, not real data: food iron values, prices, bowl weights, the mix of foods in "other", requirement distributions. The *pattern* of the results above (what depends on what) is more likely to hold than any specific number
+* **Small study:** 6-12 replicates per scenario; Bayesian methods only on 3 scenarios with 6 replicates each. Differences of a few points are within noise
+* **Only purchases:** own production, gifts and meals eaten outside the home are not modelled, and everyone in a household eats the same *kinds* of food
+* **Constant absorption** (14% for everyone); in reality it varies with diet and health
+* **Helpful analyst:** methods B and C know the true rates of forgetting and food leaving the household
+* **Prevalence is for the surveyed women**; generalising to the whole country needs survey weights and design, which are not part of this study
+
+# Technical notes {.unnumbered}
+
+**Number of plausible-value sets.** The Bayesian methods use 4 sets of plausible values per survey (to keep run time manageable). As the worked example shows, that is too few to trace out a smooth interval; the reported intervals partly reflect which four sets happened to be drawn. Using more sets with shorter model runs could fix this.
+
+**Bayesian fitting warnings.** The Bayesian runs produce warnings from Stan about *R-hat* and *effective sample size*. These concern the parameters describing the variation between households (the spread of true consumption and of sharing noise), which the data cannot separate: only their combined effect is identified. The *prevalence* itself converged (R-hat about 1.00 and an effective sample size of roughly 150-300 per fit in checks with 500 iterations), so these warnings are not expected to change the results. A re-parametrisation of the model would remove them. One caution: in the worked example one of the four model fits also reported 20 divergent transitions out of 300 draws, which is a sign the sampler struggled in part of the parameter space (probably related to the same weak identification); the intervals from the Bayesian methods should not be relied upon until this is fixed.
+
+**Reproducing the results.** 
+
+From the repository root, after having set the working directory to it: 
+
+
+```bash
+Rscript run_study.R quick # sanity check, a few minutes
+Rscript run_study.R full  # this complete study (runtime ~20min for me)
+Rscript 05_illustration.R; Rscript 06_bias_budget.R
+quarto render report.qmd # this report
+```
+
+The code, the model (`stan/intake_hier.stan`) and a README are in the repository.
